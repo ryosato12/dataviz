@@ -1,0 +1,156 @@
+---
+title: "FinalProject"
+output: html_document
+date: "`r Sys.Date()`"
+output:
+pdf_document: default
+html_document:
+highlight: tango
+urlcolor: blue
+header-includes: \usepackage{hayesmacros}
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(mice)
+library(factoextra)
+library(TDAmapper)
+library(ggplot2)
+library(igraph)
+library(e1071)
+library(pROC)
+```
+
+In this step, we import our data. We make sure to name our variables according to the original dataset. We replace the values for the class labels, $2$ and $4$, with $0$ and $1$ for simplicity. 
+
+```{r}
+breast_cancer <- read.table('breast-cancer-wisconsin.data',sep=',',col.names=c('sample_code_number','clump_thickness','uniformity_of_cel_size','uniformity_of_cell_shape','marginal_adhesion','single_epithelial_cell_size','bare_nuclei','bland_chromatin','normal_nucleoli','mitoses','diagnosis'))
+breast_cancer$bare_nuclei <- as.integer(breast_cancer$bare_nuclei) # bare_nuclei has missing values
+breast_cancer$diagnosis <- replace(breast_cancer$diagnosis, breast_cancer$diagnosis==2, 0)
+breast_cancer$diagnosis <- replace(breast_cancer$diagnosis, breast_cancer$diagnosis==4, 1)
+```
+
+bare_nuclei seems to be missing some values. We impute this data by predictive mean matching. 
+
+```{r}
+breast_cancer_imputed <- complete(mice(breast_cancer,method='pmm'))
+```
+
+We run PCA and visualize our results by a scree plot. It seems that our relationships between varaibles are linear. We might not need kPCA or IsoMap.   
+
+```{r}
+pc <- princomp(scale(breast_cancer_imputed[,-c(1,11)]))
+fviz_eig(pc)
+```
+
+We visualize our variables in the biplot. A lot of variables lie closely on the horizontal line, which is the first principal component. The second principal component does not explain a lot of the variance in our data. 
+
+```{r}
+fviz_pca_var(pc,
+             col.var='contrib',
+             gradient.cols=c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel=TRUE   
+             )
+```
+
+Check to see if our scree plot is giving the right plot we want. 
+
+```{r}
+plot(pc)
+```
+
+Mapper algorithm adapted from the lecture notes. 
+
+```{r}
+set.seed(47)
+breast_cancer_dist <- dist(breast_cancer_imputed[,-c(1,11)])
+breast_cancer_mapper <- mapper(dist_object=breast_cancer_dist, filter_values = pc$scores[,1], 
+                     num_intervals=5, percent_overlap=60, 
+                     num_bins_when_clustering=13)
+breast_cancer_graph <- graph.adjacency(breast_cancer_mapper$adjacency, mode='undirected')
+plot(breast_cancer_graph,layout=layout.auto(breast_cancer_graph) )
+```
+
+```{r}
+y.pos.vertex <- rep(0,breast_cancer_mapper$num_vertices)
+for (i in 1:breast_cancer_mapper$num_vertices){
+  points.in.vertex <- breast_cancer_mapper$points_in_vertex[[i]]
+  y.pos.vertex[i] <- names(which.max(table(breast_cancer$diagnosis[points.in.vertex])))
+}
+y.pos.vertex <- as.factor(y.pos.vertex)
+vertex.size <- rep(0,breast_cancer_mapper$num_vertices)
+for (i in 1:breast_cancer_mapper$num_vertices){
+  points.in.vertex <- breast_cancer_mapper$points_in_vertex[[i]]
+  vertex.size[i] <- length((breast_cancer_mapper$points_in_vertex[[i]]))
+}
+```
+
+The is two benign clusters connected with a malignant cluster. Perhaps, there benign clusters are closely related, so they have a higher chance of becoming malignant compared to the $2$ benign cluster on the left. 
+
+```{r}
+set.seed(47)
+colors <- c('#00AFBB', '#FC4E07')
+V(breast_cancer_graph)$color <- colors[as.numeric(y.pos.vertex)]
+V(breast_cancer_graph)$size <- 20 #vertex.size
+plot(breast_cancer_graph)
+legend(x=1, y=1, legend=c('benign','malignant'), unique(colors[as.numeric(y.pos.vertex)]))
+```
+
+We solve a classification problem using $3$ principal components with SVM and random forest. We split the data into training and testing set. 
+
+```{r}
+set.seed(47)
+data.breast_cancer <- as.data.frame(cbind(breast_cancer_imputed$diagnosis, scale(pc$scores[,1])))
+names(data.breast_cancer) <- c('y','x1')
+
+smp_size <- floor(0.75 * nrow(breast_cancer_imputed))
+train_ind <- sample(seq_len(nrow(breast_cancer_imputed)), size=smp_size)
+
+train <- data.breast_cancer[train_ind, ]
+test <- data.breast_cancer[-train_ind, ]
+```
+
+SVM is tuned. Our AUC is around 0.9814. 
+
+```{r}
+svm.cv2 <- tune(svm, y~., data=train, ranges = list(gamma = 2^(-5:5), cost = 2^(-7:5)),
+               tunecontrol = tune.control(sampling = "fix"))
+fit.svm2 <- svm(y~., data=train, cost=svm.cv2$best.parameters[,1], gamma=svm.cv2$best.parameters[,2])
+
+prediction <- predict(fit.svm2, newdata=test, type='response')
+
+roc1 <- roc(test$y, prediction)
+plot(roc1, main='ROC results for classification using 1 principal component')
+auc(roc1)
+```
+
+Our random forest is not tuned, but it gives approximately same AUC. 
+
+```{r}
+library(randomForest)
+
+rf.fit <- randomForest(train,mtry=sqrt(ncol(train)),maxnodes=50)
+
+prediction2 <- predict(fit.svm2, newdata=test, type='response')
+
+roc2 <- roc(test$y, prediction2)
+plot(roc2)
+auc(roc2)
+```
+
+It seems that using lower dimensional representation of our data works well with classification problems as well. The issue is that there is not much interpretability.   
+
+
+```{r}
+data1 <- breast_cancer_imputed[,-1]
+rf.fit.all <- randomForest(data1$diagnosis~., data=data1, mtry=3, maxnodes=50)
+rf.fit.all$importance 
+```
+
+```{r}
+diag(cov(breast_cancer_imputed)) # continous and live between 8 to 10, lost all the information, variabilities is small 
+```
+
+
+
